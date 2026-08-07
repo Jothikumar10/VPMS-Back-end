@@ -8,7 +8,12 @@ const { asyncHandler, AppError } = require('../middleware/errorHandler');
 const getEmployees = asyncHandler(async (req, res) => {
   const { search, active } = req.query;
   const filter = {};
-  if (active === 'true') filter.isActive = true;
+
+  // Matches true AND documents where isActive is undefined/missing
+  if (active === 'true') {
+    filter.isActive = { $ne: false };
+  }
+
   if (search) {
     filter.$or = [
       { name: { $regex: search, $options: 'i' } },
@@ -16,6 +21,7 @@ const getEmployees = asyncHandler(async (req, res) => {
       { department: { $regex: search, $options: 'i' } },
     ];
   }
+
   const employees = await Employee.find(filter).sort({ name: 1 });
   res.json({ employees });
 });
@@ -32,10 +38,20 @@ const createEmployee = asyncHandler(async (req, res) => {
   if (!name || !email || !phone || !department || !designation) {
     throw new AppError('All employee fields are required.', 400);
   }
+
   const existing = await Employee.findOne({ email: email.toLowerCase() });
   if (existing) throw new AppError('An employee with this email already exists.', 409);
 
-  const employee = await Employee.create({ name, email, phone, department, designation });
+  // Explicitly set isActive: true on creation
+  const employee = await Employee.create({
+    name,
+    email: email.toLowerCase(),
+    phone,
+    department,
+    designation,
+    isActive: true,
+  });
+
   res.status(201).json({ employee });
 });
 
@@ -51,7 +67,7 @@ const updateEmployee = asyncHandler(async (req, res) => {
   }
 
   if (name !== undefined) employee.name = name;
-  if (email !== undefined) employee.email = email;
+  if (email !== undefined) employee.email = email.toLowerCase();
   if (phone !== undefined) employee.phone = phone;
   if (department !== undefined) employee.department = department;
   if (designation !== undefined) employee.designation = designation;
@@ -70,6 +86,7 @@ const deleteEmployee = asyncHandler(async (req, res) => {
   if (linkedUser) {
     throw new AppError('Cannot delete employee with a linked user account. Deactivate instead.', 400);
   }
+
   const hasVisits = await VisitRequest.exists({ employee: employee._id });
   if (hasVisits) {
     employee.isActive = false;
@@ -81,4 +98,10 @@ const deleteEmployee = asyncHandler(async (req, res) => {
   res.json({ message: 'Employee deleted successfully.' });
 });
 
-module.exports = { getEmployees, getEmployeeById, createEmployee, updateEmployee, deleteEmployee };
+module.exports = {
+  getEmployees,
+  getEmployeeById,
+  createEmployee,
+  updateEmployee,
+  deleteEmployee,
+};
