@@ -1,14 +1,21 @@
-// Usage: authorize('admin', 'receptionist')
+// middleware/authorize.js
+
 const authorize = (...allowedRoles) => {
   return (req, res, next) => {
     if (!req.user) {
-      return res.status(401).json({ message: 'Not authorized.' });
-    }
-    if (!allowedRoles.includes(req.user.role)) {
-      return res.status(403).json({
-        message: `Access denied. This action requires role: ${allowedRoles.join(' or ')}.`,
+      return res.status(401).json({
+        success: false,
+        message: "Not authorized. Please login.",
       });
     }
+
+    if (!allowedRoles.includes(req.user.role)) {
+      return res.status(403).json({
+        success: false,
+        message: `Access denied. Allowed roles: ${allowedRoles.join(", ")}`,
+      });
+    }
+
     next();
   };
 };

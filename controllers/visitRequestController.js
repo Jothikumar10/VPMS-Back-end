@@ -25,8 +25,19 @@ const populateOpts = [
   { path: 'checkedOutBy', select: 'name role' },
 ];
 
+// Helper to reliably retrieve Employee ID for an employee user
+const getEmployeeIdFromUser = async (user) => {
+  if (user.employee) return user.employee;
+  
+  // Fallback: search employee record linked by userId or email
+  const employee = await Employee.findOne({
+    $or: [{ user: user._id }, { email: user.email }]
+  });
+  return employee ? employee._id : null;
+};
+
 // ---------------------------------------------------------------------------
-// @route POST /api/visit-requests   (receptionist)  -- Visitor Registration
+// @route POST /api/visit-requests   (receptionist OR self-service visitor)
 // ---------------------------------------------------------------------------
 const registerVisitor = asyncHandler(async (req, res) => {
   const {
@@ -76,6 +87,13 @@ const registerVisitor = asyncHandler(async (req, res) => {
     await visitor.save();
   }
 
+  // Self-service submissions must be tied to the logged-in visitor's own
+  // account email — never trust a visitor-editable email field for this.
+  if (req.user.role === 'visitor' && visitor.email !== req.user.email) {
+    visitor.email = req.user.email;
+    await visitor.save();
+  }
+
   // ---- Rule 1: Visitor cannot have more than one active visit at the same time ----
   const activeExisting = await VisitRequest.findOne({
     visitor: visitor._id,
@@ -121,18 +139,23 @@ const registerVisitor = asyncHandler(async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// @route GET /api/visit-requests   (search + filter, all authenticated roles)
-// Query params: visitorName, employeeName, status, dateFrom, dateTo, mine
+// @route GET /api/visit-requests   (search + filter, staff roles)
 // ---------------------------------------------------------------------------
 const getVisitRequests = asyncHandler(async (req, res) => {
   const { visitorName, employeeName, status, dateFrom, dateTo, excludeCancelled, page = 1, limit = 20 } = req.query;
 
   const filter = {};
 
-  // Employees only ever see requests addressed to them
+  // Employees only see requests addressed to them
   if (req.user.role === 'employee') {
-    if (!req.user.employee) throw new AppError('Your account is not linked to an employee profile.', 400);
-    filter.employee = req.user.employee;
+    const employeeId = await getEmployeeIdFromUser(req.user);
+    if (!employeeId) {
+      return res.json({
+        visitRequests: [],
+        pagination: { page: 1, limit: parseInt(limit, 10) || 20, total: 0, pages: 0 },
+      });
+    }
+    filter.employee = employeeId;
   }
 
   if (status) filter.status = status;
@@ -174,37 +197,60 @@ const getVisitRequests = asyncHandler(async (req, res) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// @route GET /api/visit-requests/my-requests   (visitor - own requests only)
+// ---------------------------------------------------------------------------
+const getMyRequests = asyncHandler(async (req, res) => {
+  const visitorDoc = await Visitor.findOne({ email: req.user.email });
+
+  if (!visitorDoc) {
+    return res.json({ visitRequests: [] });
+  }
+
+  const visitRequests = await VisitRequest.find({ visitor: visitorDoc._id })
+    .populate(populateOpts)
+    .sort({ createdAt: -1 });
+
+  res.json({ visitRequests });
+});
+
 const getVisitRequestById = asyncHandler(async (req, res) => {
   const visitRequest = await VisitRequest.findById(req.params.id).populate(populateOpts);
   if (!visitRequest) throw new AppError('Visit request not found.', 404);
 
-  if (req.user.role === 'employee' && String(visitRequest.employee._id) !== String(req.user.employee)) {
-    throw new AppError('You are not authorized to view this request.', 403);
+  if (req.user.role === 'employee') {
+    const employeeId = await getEmployeeIdFromUser(req.user);
+    if (String(visitRequest.employee._id) !== String(employeeId)) {
+      throw new AppError('You are not authorized to view this request.', 403);
+    }
   }
   res.json({ visitRequest });
 });
 
-// @route GET /api/visit-requests/:id/activity
 const getActivityHistory = asyncHandler(async (req, res) => {
   const visitRequest = await VisitRequest.findById(req.params.id);
   if (!visitRequest) throw new AppError('Visit request not found.', 404);
-  if (req.user.role === 'employee' && String(visitRequest.employee) !== String(req.user.employee)) {
-    throw new AppError('You are not authorized to view this request.', 403);
+
+  if (req.user.role === 'employee') {
+    const employeeId = await getEmployeeIdFromUser(req.user);
+    if (String(visitRequest.employee) !== String(employeeId)) {
+      throw new AppError('You are not authorized to view this request.', 403);
+    }
   }
+
   const activity = await ActivityLog.find({ visitRequest: req.params.id })
     .populate('performedBy', 'name role')
     .sort({ timestamp: 1 });
+
   res.json({ activity });
 });
 
-// ---------------------------------------------------------------------------
-// @route PUT /api/visit-requests/:id/approve   (employee)
-// ---------------------------------------------------------------------------
 const approveRequest = asyncHandler(async (req, res) => {
   const visitRequest = await VisitRequest.findById(req.params.id);
   if (!visitRequest) throw new AppError('Visit request not found.', 404);
 
-  if (String(visitRequest.employee) !== String(req.user.employee)) {
+  const employeeId = await getEmployeeIdFromUser(req.user);
+  if (String(visitRequest.employee) !== String(employeeId)) {
     throw new AppError('You can only approve requests addressed to you.', 403);
   }
   if (visitRequest.status !== 'pending') {
@@ -222,13 +268,13 @@ const approveRequest = asyncHandler(async (req, res) => {
   res.json({ visitRequest: populated });
 });
 
-// @route PUT /api/visit-requests/:id/reject   (employee)
 const rejectRequest = asyncHandler(async (req, res) => {
   const { reason, remarks } = req.body;
   const visitRequest = await VisitRequest.findById(req.params.id);
   if (!visitRequest) throw new AppError('Visit request not found.', 404);
 
-  if (String(visitRequest.employee) !== String(req.user.employee)) {
+  const employeeId = await getEmployeeIdFromUser(req.user);
+  if (String(visitRequest.employee) !== String(employeeId)) {
     throw new AppError('You can only reject requests addressed to you.', 403);
   }
   if (visitRequest.status !== 'pending') {
@@ -247,14 +293,15 @@ const rejectRequest = asyncHandler(async (req, res) => {
   res.json({ visitRequest: populated });
 });
 
-// @route PUT /api/visit-requests/:id/remarks   (employee) - add/update remarks any time
 const addRemarks = asyncHandler(async (req, res) => {
   const { remarks } = req.body;
   if (!remarks) throw new AppError('Remarks text is required.', 400);
 
   const visitRequest = await VisitRequest.findById(req.params.id);
   if (!visitRequest) throw new AppError('Visit request not found.', 404);
-  if (String(visitRequest.employee) !== String(req.user.employee)) {
+  
+  const employeeId = await getEmployeeIdFromUser(req.user);
+  if (String(visitRequest.employee) !== String(employeeId)) {
     throw new AppError('You can only add remarks to requests addressed to you.', 403);
   }
 
@@ -264,19 +311,13 @@ const addRemarks = asyncHandler(async (req, res) => {
   res.json({ visitRequest: populated });
 });
 
-// ---------------------------------------------------------------------------
-// @route PUT /api/visit-requests/:id/check-in   (receptionist)
-// ---------------------------------------------------------------------------
 const checkInVisitor = asyncHandler(async (req, res) => {
   const visitRequest = await VisitRequest.findById(req.params.id);
   if (!visitRequest) throw new AppError('Visit request not found.', 404);
 
-  // ---- Rule 9: Rejected requests cannot be checked in ----
   if (visitRequest.status === 'rejected') {
     throw new AppError('Rejected visitor requests cannot be checked in.', 400);
   }
-  // ---- Rule 6: Visitors can only be checked in after approval ----
-  // ---- Rule 7: A visitor who is already checked in cannot be checked in again ----
   if (visitRequest.status !== 'approved') {
     if (visitRequest.status === 'checked-in') {
       throw new AppError('This visitor is already checked in.', 400);
@@ -296,7 +337,6 @@ const checkInVisitor = asyncHandler(async (req, res) => {
   res.json({ visitRequest: populated });
 });
 
-// @route PUT /api/visit-requests/:id/check-out   (receptionist)
 const checkOutVisitor = asyncHandler(async (req, res) => {
   const visitRequest = await VisitRequest.findById(req.params.id);
   if (!visitRequest) throw new AppError('Visit request not found.', 404);
@@ -306,7 +346,6 @@ const checkOutVisitor = asyncHandler(async (req, res) => {
   }
 
   const checkOutTime = new Date();
-  // ---- Rule 8: Check-out time must always be later than check-in time ----
   if (checkOutTime <= visitRequest.checkInTime) {
     throw new AppError('Check-out time must be later than check-in time.', 400);
   }
@@ -322,7 +361,6 @@ const checkOutVisitor = asyncHandler(async (req, res) => {
   res.json({ visitRequest: populated });
 });
 
-// @route PUT /api/visit-requests/:id/cancel   (receptionist)
 const cancelRequest = asyncHandler(async (req, res) => {
   const visitRequest = await VisitRequest.findById(req.params.id);
   if (!visitRequest) throw new AppError('Visit request not found.', 404);
@@ -344,6 +382,7 @@ const cancelRequest = asyncHandler(async (req, res) => {
 module.exports = {
   registerVisitor,
   getVisitRequests,
+  getMyRequests,
   getVisitRequestById,
   getActivityHistory,
   approveRequest,

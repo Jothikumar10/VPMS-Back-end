@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const {
-  registerVisitor, getVisitRequests, getVisitRequestById, getActivityHistory,
+  registerVisitor, getVisitRequests, getMyRequests, getVisitRequestById, getActivityHistory,
   approveRequest, rejectRequest, addRemarks,
   checkInVisitor, checkOutVisitor, cancelRequest,
 } = require('../controllers/visitRequestController');
@@ -10,16 +10,22 @@ const { authorize } = require('../middleware/roleCheck');
 
 router.use(protect);
 
-// Search / list - all roles (results scoped per role inside controller)
+// Visitor: view own requests — must come BEFORE '/:id',
+// otherwise Express matches "my-requests" as an :id param
+router.get('/my-requests', authorize('visitor'), getMyRequests);
+
+// Registration — receptionist (walk-ins) or the visitor themself (self-service)
+router.post('/', authorize('receptionist', 'visitor'), registerVisitor);
+
+// Search / list - staff roles (results scoped per role inside controller)
 router.get('/', authorize('admin', 'receptionist', 'employee'), getVisitRequests);
-router.get('/:id', authorize('admin', 'receptionist', 'employee'), getVisitRequestById);
+router.get('/:id', authorize('admin', 'receptionist', 'employee', 'visitor'), getVisitRequestById);
 router.get('/:id/activity', authorize('admin', 'receptionist', 'employee'), getActivityHistory);
 
-// Receptionist: registration, check-in, check-out, cancel
-router.post('/', authorize('receptionist'), registerVisitor);
+// Receptionist: check-in, check-out, cancel
 router.put('/:id/check-in', authorize('receptionist'), checkInVisitor);
 router.put('/:id/check-out', authorize('receptionist'), checkOutVisitor);
-router.put('/:id/cancel', authorize('receptionist'), cancelRequest);
+router.put('/:id/cancel', authorize('receptionist', 'visitor'), cancelRequest);
 
 // Employee: approve, reject, remarks
 router.put('/:id/approve', authorize('employee'), approveRequest);

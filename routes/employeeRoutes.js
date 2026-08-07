@@ -8,8 +8,8 @@ const { authorize } = require('../middleware/roleCheck');
 
 router.use(protect);
 
-// Admin, receptionist, and employees can view the directory (needed for dropdowns)
-router.get('/', authorize('admin', 'receptionist', 'employee'), getEmployees);
+// Admin, receptionist, employees, and visitors can view the directory (needed for dropdowns)
+router.get('/', authorize('admin', 'receptionist', 'employee', 'visitor'), getEmployees);
 router.get('/:id', authorize('admin', 'receptionist', 'employee'), getEmployeeById);
 
 // Only admin can manage employee records
